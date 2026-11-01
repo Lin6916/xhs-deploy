@@ -1,4 +1,4 @@
-// 小红书链接预览卡服务 · 127.0.0.1:8790
+// 小红书链接预览卡服务 · 容器内监听 0.0.0.0:8790（宿主机仅 127.0.0.1 映射）
 const http = require("http");
 
 const PORT = 8790;
@@ -155,4 +155,4 @@ http
     if (path === "/health") return sendJSON(res, 200, { ok: true, uptime: process.uptime() });
     sendJSON(res, 404, { ok: false, error: "not found" });
   })
-  .listen(PORT, "127.0.0.1", () => console.log("xhs-card on 127.0.0.1:" + PORT));
+  .listen(PORT, "0.0.0.0", () => console.log("xhs-card on 0.0.0.0:" + PORT));
