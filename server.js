@@ -1,7 +1,9 @@
 // 小红书链接预览卡服务 · 容器内监听 0.0.0.0:8790（宿主机仅 127.0.0.1 映射）
+// 请求头 x-xhs-token 或 ?token= 与 XHS_TOKEN 一致才放行；/health 不校验
 const http = require("http");
 
 const PORT = 8790;
+const TOKEN = process.env.XHS_TOKEN || "";
 const UA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 " +
   "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
@@ -13,6 +15,8 @@ function sendJSON(res, code, obj) {
   res.writeHead(code, {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": "*",
+    "access-control-allow-headers": "content-type, x-xhs-token",
+    "access-control-allow-methods": "POST, GET, OPTIONS",
     "cache-control": "no-store"
   });
   res.end(JSON.stringify(obj));
@@ -26,6 +30,13 @@ async function readBody(req) {
   } catch {
     return {};
   }
+}
+
+function authorized(req, urlObj) {
+  if (!TOKEN) return true;
+  const h = req.headers["x-xhs-token"];
+  const q = urlObj.searchParams.get("token");
+  return h === TOKEN || q === TOKEN;
 }
 
 function extractState(html) {
@@ -148,11 +159,13 @@ async function handleImages(req, res) {
 
 http
   .createServer(async (req, res) => {
-    const path = (req.url || "").split("?")[0];
+    const urlObj = new URL(req.url || "/", "http://127.0.0.1");
+    const path = urlObj.pathname;
     if (req.method === "OPTIONS") return sendJSON(res, 204, {});
+    if (path === "/health") return sendJSON(res, 200, { ok: true, uptime: process.uptime() });
+    if (!authorized(req, urlObj)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
     if (req.method === "POST" && path === "/api/xhs-card") return handleCard(req, res);
     if (req.method === "POST" && path === "/api/xhs-images") return handleImages(req, res);
-    if (path === "/health") return sendJSON(res, 200, { ok: true, uptime: process.uptime() });
     sendJSON(res, 404, { ok: false, error: "not found" });
   })
-  .listen(PORT, "0.0.0.0", () => console.log("xhs-card on 0.0.0.0:" + PORT));
+  .listen(PORT, "0.0.0.0", () => console.log("xhs-card on 0.0.0.0:" + PORT + (TOKEN ? " (token required)" : " (no token)")));
