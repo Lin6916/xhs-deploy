@@ -1,4 +1,4 @@
-// 小红书链接预览卡服务 · 容器内监听 0.0.0.0:8790（宿主机仅 127.0.0.1 映射）
+// 小红书预览 + 取页服务 · 容器内监听 0.0.0.0:8790
 // 请求头 x-xhs-token 或 ?token= 与 XHS_TOKEN 一致才放行；/health 不校验
 const http = require("http");
 
@@ -10,6 +10,18 @@ const UA =
 const XHS_REFERER = "https://www.xiaohongshu.com/";
 const MAX_IMAGES = 12;
 const IMAGE_TIMEOUT = 12000;
+const FETCH_LIMIT = 60000;
+
+const BLOCKED_HOST = [
+  /^localhost$/i,
+  /^127\./,
+  /^10\./,
+  /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./,
+  /^169\.254\./,
+  /^0\.0\.0\.0$/,
+  /^\[?::1\]?$/i
+];
 
 function sendJSON(res, code, obj) {
   res.writeHead(code, {
@@ -37,6 +49,24 @@ function authorized(req, urlObj) {
   const h = req.headers["x-xhs-token"];
   const q = urlObj.searchParams.get("token");
   return h === TOKEN || q === TOKEN;
+}
+
+function stripHTML(html) {
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function extractState(html) {
@@ -157,6 +187,52 @@ async function handleImages(req, res) {
   });
 }
 
+// 取页：把任意公开网页变成可读文本，给 AI 当眼睛用
+async function handleFetch(req, res, urlObj) {
+  let target = urlObj.searchParams.get("url");
+  let raw = urlObj.searchParams.get("raw") === "1";
+  if (!target) {
+    const body = await readBody(req);
+    target = body.url;
+    if (body.raw) raw = true;
+  }
+  if (!target || typeof target !== "string") return sendJSON(res, 400, { ok: false, error: "缺少 url" });
+
+  let u;
+  try {
+    u = new URL(target);
+  } catch {
+    return sendJSON(res, 400, { ok: false, error: "url 不合法" });
+  }
+  if (!/^https?:$/.test(u.protocol)) return sendJSON(res, 400, { ok: false, error: "只支持 http/https" });
+  if (BLOCKED_HOST.some((re) => re.test(u.hostname))) return sendJSON(res, 403, { ok: false, error: "不抓内网地址" });
+
+  try {
+    const r = await fetch(u.href, {
+      headers: {
+        "user-agent": UA,
+        "accept-language": "zh-CN,zh;q=0.9",
+        accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8"
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(20000)
+    });
+    const ct = (r.headers.get("content-type") || "").split(";")[0];
+    const body = await r.text();
+    const text = ct.includes("html") && !raw ? stripHTML(body) : body;
+    sendJSON(res, 200, {
+      ok: r.ok,
+      status: r.status,
+      url: r.url,
+      contentType: ct,
+      length: text.length,
+      text: text.slice(0, FETCH_LIMIT)
+    });
+  } catch (e) {
+    sendJSON(res, 502, { ok: false, error: String((e && e.message) || e) });
+  }
+}
+
 http
   .createServer(async (req, res) => {
     const urlObj = new URL(req.url || "/", "http://127.0.0.1");
@@ -166,6 +242,7 @@ http
     if (!authorized(req, urlObj)) return sendJSON(res, 401, { ok: false, error: "unauthorized" });
     if (req.method === "POST" && path === "/api/xhs-card") return handleCard(req, res);
     if (req.method === "POST" && path === "/api/xhs-images") return handleImages(req, res);
+    if ((req.method === "POST" || req.method === "GET") && path === "/api/fetch") return handleFetch(req, res, urlObj);
     sendJSON(res, 404, { ok: false, error: "not found" });
   })
-  .listen(PORT, "0.0.0.0", () => console.log("xhs-card on 0.0.0.0:" + PORT + (TOKEN ? " (token required)" : " (no token)")));
+  .listen(PORT, "0.0.0.0", () => console.log("eye on 0.0.0.0:" + PORT + (TOKEN ? " (token required)" : " (no token)")));
